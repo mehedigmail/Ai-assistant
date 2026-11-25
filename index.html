@@ -1,1 +1,236 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#080D18">
 
+  <title>Auto Best Market Signal</title>
+
+  <link rel="stylesheet" href="./style.css">
+</head>
+
+<body>
+
+  <main class="app-container">
+
+    <!-- HEADER -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">AS</div>
+
+        <div>
+          <h1>Auto Signal</h1>
+          <p>Real Market Analysis</p>
+        </div>
+      </div>
+
+      <div class="connection-status" id="statusBadge">
+        <span class="status-dot"></span>
+        <span id="statusText">Connecting...</span>
+      </div>
+    </header>
+
+
+    <!-- MAIN DASHBOARD -->
+    <section class="dashboard">
+
+      <!-- SELECTED MARKET -->
+      <div class="info-card">
+        <div class="card-label">
+          Selected Market
+        </div>
+
+        <div class="card-value" id="selectedMarket">
+          Waiting...
+        </div>
+
+        <div class="card-subtitle" id="marketSelectionStatus">
+          Automatically selected best market
+        </div>
+      </div>
+
+
+      <!-- MARKET PRICE -->
+      <div class="info-card">
+        <div class="card-label">
+          Market Price
+        </div>
+
+        <div class="card-value price-value" id="marketPrice">
+          --
+        </div>
+
+        <div class="card-subtitle" id="priceStatus">
+          Waiting for live market data
+        </div>
+      </div>
+
+
+      <!-- SIGNAL -->
+      <div class="info-card signal-card">
+        <div class="card-label">
+          Signal
+        </div>
+
+        <div class="signal-value wait" id="signal">
+          WAIT
+        </div>
+
+        <div class="card-subtitle" id="signalSubtitle">
+          Waiting for market analysis
+        </div>
+      </div>
+
+
+      <!-- TECHNICAL SCORE -->
+      <div class="info-card">
+        <div class="card-label">
+          Technical Score
+        </div>
+
+        <div class="card-value" id="confidence">
+          --%
+        </div>
+
+        <div class="card-subtitle">
+          Technical score, not win probability
+        </div>
+      </div>
+
+
+      <!-- NEXT SIGNAL CHECK -->
+      <div class="info-card">
+        <div class="card-label">
+          Next Signal Check
+        </div>
+
+        <div class="card-value timer-value" id="nextSignalCheck">
+          --
+        </div>
+
+        <div class="card-subtitle">
+          Candle closing countdown
+        </div>
+      </div>
+
+
+      <!-- ANALYSIS MESSAGE -->
+      <div class="analysis-card">
+        <div class="analysis-heading">
+          Analysis Status
+        </div>
+
+        <div class="analysis-message" id="analysisReason">
+          Press Start Analysis to find the best market.
+        </div>
+
+        <div class="analysis-meta" id="analysisStatus">
+          System ready
+        </div>
+      </div>
+
+
+      <!-- BUTTONS -->
+      <div class="action-buttons">
+
+        <button
+          type="button"
+          class="start-button"
+          id="startAnalysis"
+          disabled
+        >
+          <span class="button-icon">▶</span>
+          START ANALYSIS
+        </button>
+
+        <button
+          type="button"
+          class="stop-button"
+          id="stopAnalysis"
+          disabled
+        >
+          <span class="button-icon">■</span>
+          STOP
+        </button>
+
+      </div>
+
+
+      <!-- SMALL INFORMATION -->
+      <div class="bottom-info">
+
+        <div class="info-row">
+          <span>Market Mode</span>
+          <strong>REAL MARKET</strong>
+        </div>
+
+        <div class="info-row">
+          <span>Timeframe</span>
+          <strong>1 MINUTE</strong>
+        </div>
+
+        <div class="info-row">
+          <span>Analysis Engine</span>
+          <strong>Technical Analysis</strong>
+        </div>
+
+        <div class="info-row">
+          <span>Data Provider</span>
+          <strong>Twelve Data</strong>
+        </div>
+
+        <div class="info-row">
+          <span>Last Analysis</span>
+          <strong id="lastAnalysisTime">--</strong>
+        </div>
+
+      </div>
+
+
+      <!-- DISCLAIMER -->
+      <footer class="disclaimer">
+        <strong>Trading Risk Notice</strong>
+
+        <p>
+          Signals are based on technical market analysis
+          and are not guaranteed predictions. Always verify
+          market prices before trading. This system does not
+          place trades automatically.
+        </p>
+      </footer>
+
+    </section>
+
+  </main>
+
+
+  <div id="accessExpiredModal" class="access-modal" role="dialog" aria-modal="true" aria-labelledby="accessExpiredTitle" hidden>
+    <div class="access-modal-card">
+      <div class="access-modal-icon">💔</div>
+      <h2 id="accessExpiredTitle">আপনার ফ্রি ক্রেডিট শেষ!</h2>
+      <p id="accessExpiredMessage">
+        দুঃখিত! আপনার ফ্রি ব্যবহারের সুযোগটি শেষ হয়েছে।<br><br>
+        আমাদের Signal Bot ব্যবহার করে আপনার অভিজ্ঞতা কেমন হয়েছে? বটের সিগন্যাল ও কার্যকারিতা ভালো লেগে থাকলে এবং ভবিষ্যতেও ব্যবহার চালিয়ে যেতে আগ্রহী হলে আমাদের সঙ্গে যোগাযোগ করুন।
+      </p>
+      <div class="access-modal-price">💎 Signal Bot-এর মূল্য মাত্র $20</div>
+      <p class="access-modal-details">
+        বটটি সংগ্রহ করতে অথবা মূল্য, ফিচার ও বিস্তারিত জানতে নিচের Facebook আইডিতে সরাসরি মেসেজ করুন।
+      </p>
+      <div class="access-developer">
+        <span class="access-developer-badge">OFFICIAL DEVELOPER</span>
+        <strong>Developed by Mehedi Hasan</strong>
+        <small>Original Signal Bot Developer</small>
+      </div>
+      <a id="facebookContactLink" class="facebook-contact-button"
+         href="https://www.facebook.com/share/19q3yL5b1e/"
+         target="_blank" rel="noopener noreferrer">f Facebook-এ মেসেজ দিন</a>
+      <p class="access-modal-note">আপনার বিশ্বাস ও সহযোগিতার জন্য ধন্যবাদ। ❤️</p>
+      <p id="accessCheckNote" class="access-check-note">অ্যাক্সেস যাচাই করা হচ্ছে...</p>
+    </div>
+  </div>
+
+  <script src="./script.js"></script>
+
+</body>
+</html>
