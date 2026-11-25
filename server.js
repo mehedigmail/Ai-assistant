@@ -4,12 +4,13 @@ const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 const crypto = require("crypto");
+const path = require("path");
 
 const app = express();
 
+app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json());
-app.use(express.static(__dirname, { index: false }));
 
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.TWELVE_DATA_API_KEY;
@@ -64,7 +65,7 @@ function tokenHash(token) {
 function setDeviceCookie(res, token) {
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   res.setHeader("Set-Cookie",
-    `${DEVICE_COOKIE}=${encodeURIComponent(token)}; Max-Age=${Math.floor(COOKIE_MS/1000)}; Path=/; HttpOnly; SameSite=Lax${secure}`
+    `${DEVICE_COOKIE}=${encodeURIComponent(token)}; Max-Age=${Math.floor(COOKIE_MS / 1000)}; Path=/; HttpOnly; SameSite=Lax${secure}`
   );
 }
 
@@ -108,27 +109,27 @@ async function registerOrReadDevice(req, res) {
 
 async function requireActiveDevice(req, res, next) {
   try {
-    if (!pool) return res.status(503).json({ success:false, code:"DATABASE_REQUIRED", message:"Access database সেটআপ করা হয়নি।" });
+    if (!pool) return res.status(503).json({ success: false, code: "DATABASE_REQUIRED", message: "Access database সেটআপ করা হয়নি।" });
     const token = readCookie(req, DEVICE_COOKIE);
-    if (!token) return res.status(403).json({ success:false, code:"ACCESS_EXPIRED", message:"এই ডিভাইসের অ্যাক্সেস নেই।" });
+    if (!token) return res.status(403).json({ success: false, code: "ACCESS_EXPIRED", message: "এই ডিভাইসের অ্যাক্সেস নেই।" });
     const result = await pool.query(
       `SELECT id, expires_at, (expires_at > NOW()) AS active FROM device_access WHERE token_hash=$1`,
       [tokenHash(token)]
     );
     if (!result.rows.length || !result.rows[0].active) {
-      return res.status(403).json({ success:false, code:"ACCESS_EXPIRED", message:"এই ডিভাইসের ৪৮ ঘণ্টার অ্যাক্সেস শেষ হয়েছে।" });
+      return res.status(403).json({ success: false, code: "ACCESS_EXPIRED", message: "এই ডিভাইসের ৪৮ ঘণ্টার অ্যাক্সেস শেষ হয়েছে।" });
     }
     req.deviceAccess = result.rows[0];
     await pool.query(`UPDATE device_access SET last_seen_at=NOW() WHERE id=$1`, [req.deviceAccess.id]);
     next();
   } catch (error) {
     console.error("Device access check failed:", error.message);
-    res.status(503).json({ success:false, code:"ACCESS_CHECK_FAILED", message:"অ্যাক্সেস যাচাই করা যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।" });
+    res.status(503).json({ success: false, code: "ACCESS_CHECK_FAILED", message: "অ্যাক্সেস যাচাই করা যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।" });
   }
 }
 
 let lastScan = null;
-let scanInProgress = false;
+let activeScanPromise = null;
 let lastRequestAt = 0;
 let requestQueue = Promise.resolve();
 
@@ -512,7 +513,6 @@ function analyzeCandles(pair, candles) {
   let signal = "WAIT";
   let reason = "এখনো যথেষ্ট শক্তিশালী সেটআপ নেই।";
 
-  // আগের তুলনায় কিছুটা নমনীয় BUY শর্ত
   if (
     adx >= 14 &&
     buyScore >= 6 &&
@@ -528,10 +528,7 @@ function analyzeCandles(pair, candles) {
     signal = "BUY";
     reason =
       "EMA ও MACD ঊর্ধ্বমুখী, RSI অনুকূলে এবং ক্যান্ডেল BUY-এর পক্ষে।";
-  }
-
-  // আগের তুলনায় কিছুটা নমনীয় SELL শর্ত
-  else if (
+  } else if (
     adx >= 14 &&
     sellScore >= 6 &&
     sellScore - buyScore >= 2 &&
@@ -593,24 +590,38 @@ async function scanPair(pair) {
 
 
 // -----------------------------
-// PAGE + DEVICE ACCESS STATUS
+// PUBLIC FRONTEND FILES ONLY
 // -----------------------------
 
 app.get("/", (req, res) => {
-  res.sendFile(require("path").join(__dirname, "index.html"));
+  res.sendFile(path.join(__dirname, "index.html"));
 });
+
+app.get("/style.css", (req, res) => {
+  res.sendFile(path.join(__dirname, "style.css"));
+});
+
+app.get("/script.js", (req, res) => {
+  res.sendFile(path.join(__dirname, "script.js"));
+});
+
+
+// -----------------------------
+// DEVICE ACCESS STATUS
+// -----------------------------
 
 app.get("/api/access/status", async (req, res) => {
   try {
     const device = await registerOrReadDevice(req, res);
     const expiresAt = new Date(device.expires_at);
     const remainingMs = Math.max(0, expiresAt.getTime() - Date.now());
-    res.json({ success:true, active:Boolean(device.active), expiresAt:expiresAt.toISOString(), remainingMs });
+    res.json({ success: true, active: Boolean(device.active), expiresAt: expiresAt.toISOString(), remainingMs });
   } catch (error) {
     console.error("Access status error:", error.message);
-    res.status(503).json({ success:false, code:"DATABASE_REQUIRED", message:"অ্যাক্সেস সিস্টেম চালু করতে Render PostgreSQL DATABASE_URL সেট করুন।" });
+    res.status(503).json({ success: false, code: "DATABASE_REQUIRED", message: "অ্যাক্সেস সিস্টেম চালু করতে Render PostgreSQL DATABASE_URL সেট করুন।" });
   }
 });
+
 
 // -----------------------------
 // HEALTH
@@ -635,12 +646,6 @@ app.get("/api/health", (req, res) => {
 // -----------------------------
 
 app.get("/api/scan", requireActiveDevice, async (req, res) => {
-  if (scanInProgress) {
-    // Reuse the result of the scan already running for another visitor.
-    while (scanInProgress) await sleep(250);
-    if (lastScan) return res.json(lastScan);
-  }
-
   if (!API_KEY) {
     return res.status(500).json({
       success: false,
@@ -648,86 +653,90 @@ app.get("/api/scan", requireActiveDevice, async (req, res) => {
     });
   }
 
-  scanInProgress = true;
-
   try {
-    const results = [];
-    let rateLimited = false;
+    if (!activeScanPromise) {
+      activeScanPromise = (async () => {
+        const results = [];
+        let rateLimited = false;
 
-    for (const pair of PAIRS) {
-      try {
-        const result = await scanPair(pair);
-        results.push(result);
-      } catch (error) {
-        if (error.status === 429) rateLimited = true;
+        for (const pair of PAIRS) {
+          try {
+            const result = await scanPair(pair);
+            results.push(result);
+          } catch (error) {
+            if (error.status === 429) rateLimited = true;
 
-        results.push({
-          pair,
-          signal: "WAIT",
-          technicalScore: null,
-          dataStatus: error.status === 429
-            ? "RATE_LIMITED"
-            : "ERROR",
-          reason: error.message || "মার্কেট বিশ্লেষণ করা যায়নি।"
-        });
+            results.push({
+              pair,
+              signal: "WAIT",
+              technicalScore: null,
+              dataStatus: error.status === 429
+                ? "RATE_LIMITED"
+                : "ERROR",
+              reason: error.message || "মার্কেট বিশ্লেষণ করা যায়নি।"
+            });
 
-        if (rateLimited) break;
-      }
+            if (rateLimited) break;
+          }
+        }
+
+        const checked = new Set(results.map(r => r.pair));
+
+        for (const pair of PAIRS) {
+          if (!checked.has(pair)) {
+            results.push({
+              pair,
+              signal: "WAIT",
+              technicalScore: null,
+              dataStatus: "NOT_CHECKED",
+              reason: "API সীমার কারণে পরীক্ষা করা যায়নি।"
+            });
+          }
+        }
+
+        const validMarkets = results.filter(
+          r => r.dataStatus === "VALID"
+        ).length;
+
+        const candidates = results
+          .filter(r =>
+            r.dataStatus === "VALID" &&
+            (r.signal === "BUY" || r.signal === "SELL")
+          )
+          .sort((a, b) =>
+            b.technicalScore - a.technicalScore ||
+            Math.abs(b.buyScore - b.sellScore) -
+            Math.abs(a.buyScore - a.sellScore) ||
+            b.indicators.adx - a.indicators.adx
+          );
+
+        const selected = candidates.length ? candidates[0] : null;
+
+        lastScan = {
+          success: true,
+          selected,
+          results,
+          validMarkets,
+          rateLimited,
+          scanTime: new Date().toISOString(),
+          message: selected
+            ? "সেরা উপযুক্ত সিগন্যাল পাওয়া গেছে।"
+            : "এখন উপযুক্ত সেটআপ নেই। WAIT করুন।"
+        };
+
+        return lastScan;
+      })().finally(() => {
+        activeScanPromise = null;
+      });
     }
 
-    const checked = new Set(results.map(r => r.pair));
-
-    for (const pair of PAIRS) {
-      if (!checked.has(pair)) {
-        results.push({
-          pair,
-          signal: "WAIT",
-          technicalScore: null,
-          dataStatus: "NOT_CHECKED",
-          reason: "API সীমার কারণে পরীক্ষা করা যায়নি।"
-        });
-      }
-    }
-
-    const validMarkets = results.filter(
-      r => r.dataStatus === "VALID"
-    ).length;
-
-    const candidates = results
-      .filter(r =>
-        r.dataStatus === "VALID" &&
-        (r.signal === "BUY" || r.signal === "SELL")
-      )
-      .sort((a, b) =>
-        b.technicalScore - a.technicalScore ||
-        Math.abs(b.buyScore - b.sellScore) -
-        Math.abs(a.buyScore - a.sellScore) ||
-        b.indicators.adx - a.indicators.adx
-      );
-
-    const selected = candidates.length ? candidates[0] : null;
-
-    lastScan = {
-      success: true,
-      selected,
-      results,
-      validMarkets,
-      rateLimited,
-      scanTime: new Date().toISOString(),
-
-      message: selected
-        ? "সেরা উপযুক্ত সিগন্যাল পাওয়া গেছে।"
-        : "এখন উপযুক্ত সেটআপ নেই। WAIT করুন।"
-    };
-
-    res.json(lastScan);
+    const scanResult = await activeScanPromise;
+    res.json(scanResult);
   } catch (error) {
     res.status(500).json({
       success: false,
       message: error.message || "স্ক্যান ব্যর্থ হয়েছে।"
     });
-  } finally {
-    scanInProgress = false;
   }
 });
 
