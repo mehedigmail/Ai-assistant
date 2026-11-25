@@ -185,7 +185,11 @@ function chooseBestMarket(results) {
     item.dataStatus === "VALID" &&
     (item.signal === "BUY" || item.signal === "SELL")
   );
-  valid.sort((a, b) => (b.technicalScore || 0) - (a.technicalScore || 0));
+  valid.sort((a, b) =>
+    (b.technicalScore || 0) - (a.technicalScore || 0) ||
+    Math.abs((b.buyScore || 0) - (b.sellScore || 0)) - Math.abs((a.buyScore || 0) - (a.sellScore || 0)) ||
+    ((b.indicators?.adx || 0) - (a.indicators?.adx || 0))
+  );
   return valid[0] || null;
 }
 
