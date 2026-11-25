@@ -27,8 +27,8 @@ const PAIRS = [
 const INTERVAL = "1min";
 const OUTPUT_SIZE = 250;
 const CACHE_TTL = 45000;
+const SCAN_CACHE_TTL = 20000;
 const REQUEST_GAP = Number(process.env.REQUEST_GAP_MS || 8000);
-
 
 // Persistent, password-free device access. Render PostgreSQL is required.
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -97,7 +97,6 @@ async function registerOrReadDevice(req, res) {
     }
   }
 
-  // No recognized device token: this browser receives its own first-visit window.
   token = crypto.randomBytes(32).toString("base64url");
   const created = await pool.query(
     `INSERT INTO device_access (token_hash, expires_at) VALUES ($1, NOW() + INTERVAL '48 hours') RETURNING id, created_at, expires_at, TRUE AS active`,
@@ -129,6 +128,7 @@ async function requireActiveDevice(req, res, next) {
 }
 
 let lastScan = null;
+let lastScanAt = 0;
 let activeScanPromise = null;
 let lastRequestAt = 0;
 let requestQueue = Promise.resolve();
@@ -139,6 +139,12 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function isFreshCandles(candles, now = Date.now()) {
+  if (!Array.isArray(candles) || candles.length < 60) return false;
+  const latest = candles[candles.length - 1];
+  return Number.isFinite(latest.time) && (now - (latest.time + 60000) <= 5 * 60000);
+}
+
 // -----------------------------
 // TWELVE DATA REQUEST
 // -----------------------------
@@ -146,30 +152,24 @@ function sleep(ms) {
 function queuedFetch(url) {
   const task = requestQueue.then(async () => {
     const wait = REQUEST_GAP - (Date.now() - lastRequestAt);
-
     if (wait > 0) await sleep(wait);
 
     lastRequestAt = Date.now();
-
     let response = await fetch(url);
+    let data = await response.json();
 
-    if (response.status === 429) {
+    if (response.status === 429 || data.code === 429) {
       await sleep(15000);
       lastRequestAt = Date.now();
       response = await fetch(url);
+      data = await response.json();
     }
-
-    const data = await response.json();
 
     if (!response.ok || data.status === "error" || data.code) {
       const error = new Error(
         data.message || `Twelve Data Error: ${response.status}`
       );
-
-      error.status = data.code === 429 || response.status === 429
-        ? 429
-        : response.status;
-
+      error.status = (data.code === 429 || response.status === 429) ? 429 : response.status;
       throw error;
     }
 
@@ -180,7 +180,6 @@ function queuedFetch(url) {
   return task;
 }
 
-
 // -----------------------------
 // MARKET DATA
 // -----------------------------
@@ -190,12 +189,14 @@ async function getMarketData(pair, force = false) {
     throw new Error("Twelve Data API Key সেট করা নেই।");
   }
 
+  const now = Date.now();
   const cached = cache.get(pair);
 
   if (
     !force &&
     cached &&
-    Date.now() - cached.time < CACHE_TTL
+    (now - cached.time < CACHE_TTL) &&
+    isFreshCandles(cached.candles, now)
   ) {
     return cached.candles;
   }
@@ -214,7 +215,7 @@ async function getMarketData(pair, force = false) {
     throw new Error("Twelve Data থেকে ক্যান্ডেল পাওয়া যায়নি।");
   }
 
-  const now = Date.now();
+  const fetchNow = Date.now();
 
   const candles = data.values
     .map(item => ({
@@ -230,7 +231,7 @@ async function getMarketData(pair, force = false) {
       Number.isFinite(c.high) &&
       Number.isFinite(c.low) &&
       Number.isFinite(c.close) &&
-      c.time + 60000 <= now
+      c.time + 60000 <= fetchNow
     )
     .sort((a, b) => a.time - b.time);
 
@@ -238,20 +239,17 @@ async function getMarketData(pair, force = false) {
     throw new Error("পর্যাপ্ত বন্ধ ক্যান্ডেল পাওয়া যায়নি।");
   }
 
-  const latest = candles[candles.length - 1];
-
-  if (now - (latest.time + 60000) > 5 * 60000) {
+  if (!isFreshCandles(candles, fetchNow)) {
     throw new Error("মার্কেট ডাটা পুরোনো।");
   }
 
   cache.set(pair, {
-    time: Date.now(),
+    time: fetchNow,
     candles
   });
 
   return candles;
 }
-
 
 // -----------------------------
 // INDICATORS
@@ -259,56 +257,42 @@ async function getMarketData(pair, force = false) {
 
 function calculateEMA(values, period) {
   if (values.length < period) return null;
-
   const multiplier = 2 / (period + 1);
-
-  let ema = values
-    .slice(0, period)
-    .reduce((a, b) => a + b, 0) / period;
-
+  let ema = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
   for (let i = period; i < values.length; i++) {
     ema = (values[i] - ema) * multiplier + ema;
   }
-
   return ema;
 }
 
 function calculateRSI(candles, period = 14) {
   if (candles.length < period + 1) return null;
-
   let gains = 0;
   let losses = 0;
 
   for (let i = candles.length - period; i < candles.length; i++) {
     const change = candles[i].close - candles[i - 1].close;
-
     if (change > 0) gains += change;
     else losses += Math.abs(change);
   }
 
   if (losses === 0) return 100;
-
   const rs = (gains / period) / (losses / period);
-
   return 100 - 100 / (1 + rs);
 }
 
 function calculateMACD(values) {
   if (values.length < 35) return null;
-
   const macdValues = [];
 
   for (let i = 25; i < values.length; i++) {
     const slice = values.slice(0, i + 1);
-
     const shortEMA = calculateEMA(slice, 12);
     const longEMA = calculateEMA(slice, 26);
-
     macdValues.push(shortEMA - longEMA);
   }
 
   if (macdValues.length < 9) return null;
-
   const value = macdValues[macdValues.length - 1];
   const signal = calculateEMA(macdValues, 9);
 
@@ -321,13 +305,11 @@ function calculateMACD(values) {
 
 function calculateATR(candles, period = 14) {
   if (candles.length < period + 1) return null;
-
   const trs = [];
 
   for (let i = candles.length - period; i < candles.length; i++) {
     const current = candles[i];
     const previous = candles[i - 1];
-
     trs.push(Math.max(
       current.high - current.low,
       Math.abs(current.high - previous.close),
@@ -340,7 +322,6 @@ function calculateATR(candles, period = 14) {
 
 function calculateADX(candles, period = 14) {
   if (candles.length < period * 2 + 1) return null;
-
   const trs = [];
   const plusDM = [];
   const minusDM = [];
@@ -348,7 +329,6 @@ function calculateADX(candles, period = 14) {
   for (let i = 1; i < candles.length; i++) {
     const c = candles[i];
     const p = candles[i - 1];
-
     const up = c.high - p.high;
     const down = p.low - c.low;
 
@@ -366,27 +346,22 @@ function calculateADX(candles, period = 14) {
 
   for (let i = period - 1; i < trs.length; i++) {
     const start = i - period + 1;
-
     const tr = trs.slice(start, i + 1).reduce((a, b) => a + b, 0);
     const plus = plusDM.slice(start, i + 1).reduce((a, b) => a + b, 0);
     const minus = minusDM.slice(start, i + 1).reduce((a, b) => a + b, 0);
 
     if (tr === 0) continue;
-
     const plusDI = 100 * plus / tr;
     const minusDI = 100 * minus / tr;
     const denominator = plusDI + minusDI;
-
     if (denominator === 0) continue;
 
     dx.push(100 * Math.abs(plusDI - minusDI) / denominator);
   }
 
   if (dx.length < period) return null;
-
   return dx.slice(-period).reduce((a, b) => a + b, 0) / period;
 }
-
 
 // -----------------------------
 // FIVE MINUTE TREND
@@ -397,9 +372,7 @@ function buildFiveMinuteCandles(candles) {
 
   for (const candle of candles) {
     const bucket = Math.floor(candle.time / 300000) * 300000;
-
     if (!groups.has(bucket)) groups.set(bucket, []);
-
     groups.get(bucket).push(candle);
   }
 
@@ -407,18 +380,15 @@ function buildFiveMinuteCandles(candles) {
 
   for (const [time, group] of groups) {
     group.sort((a, b) => a.time - b.time);
-
     if (group.length !== 5) continue;
 
     let consecutive = true;
-
     for (let i = 1; i < group.length; i++) {
       if (group[i].time - group[i - 1].time !== 60000) {
         consecutive = false;
         break;
       }
     }
-
     if (!consecutive) continue;
 
     result.push({
@@ -433,9 +403,8 @@ function buildFiveMinuteCandles(candles) {
   return result.sort((a, b) => a.time - b.time);
 }
 
-
 // -----------------------------
-// MARKET ANALYSIS
+// MARKET ANALYSIS (BALANCED FAST)
 // -----------------------------
 
 function analyzeCandles(pair, candles) {
@@ -451,7 +420,6 @@ function analyzeCandles(pair, candles) {
 
   const fiveCandles = buildFiveMinuteCandles(candles);
   const fiveCloses = fiveCandles.map(c => c.close);
-
   const fiveEMA9 = calculateEMA(fiveCloses, 9);
   const fiveEMA21 = calculateEMA(fiveCloses, 21);
 
@@ -463,11 +431,8 @@ function analyzeCandles(pair, candles) {
     throw new Error("ইন্ডিকেটর হিসাব করার মতো ডাটা নেই।");
   }
 
-  const higherTrendBuy =
-    fiveEMA9 !== null && fiveEMA21 !== null && fiveEMA9 > fiveEMA21;
-
-  const higherTrendSell =
-    fiveEMA9 !== null && fiveEMA21 !== null && fiveEMA9 < fiveEMA21;
+  const higherTrendBuy = fiveEMA9 !== null && fiveEMA21 !== null && fiveEMA9 > fiveEMA21;
+  const higherTrendSell = fiveEMA9 !== null && fiveEMA21 !== null && fiveEMA9 < fiveEMA21;
 
   const support = Math.min(...candles.slice(-30).map(c => c.low));
   const resistance = Math.max(...candles.slice(-30).map(c => c.high));
@@ -493,8 +458,8 @@ function analyzeCandles(pair, candles) {
   if (macdBuy) buyScore += 2;
   if (macdSell) sellScore += 2;
 
-  if (rsi >= 50 && rsi <= 68) buyScore += 1;
-  if (rsi >= 32 && rsi <= 50) sellScore += 1;
+  if (rsi >= 48 && rsi <= 70) buyScore += 1;
+  if (rsi >= 30 && rsi <= 52) sellScore += 1;
 
   if (candleBuy) buyScore += 1;
   if (candleSell) sellScore += 1;
@@ -502,7 +467,7 @@ function analyzeCandles(pair, candles) {
   if (higherTrendBuy) buyScore += 1;
   if (higherTrendSell) sellScore += 1;
 
-  if (adx >= 14) {
+  if (adx >= 12) {
     buyScore += 1;
     sellScore += 1;
   }
@@ -514,35 +479,33 @@ function analyzeCandles(pair, candles) {
   let reason = "এখনো যথেষ্ট শক্তিশালী সেটআপ নেই।";
 
   if (
-    adx >= 14 &&
+    adx >= 12 &&
     buyScore >= 6 &&
-    buyScore - sellScore >= 2 &&
+    buyScore - sellScore >= 1 &&
     emaBuy &&
     macdBuy &&
-    rsi >= 50 &&
-    rsi <= 68 &&
+    rsi >= 48 &&
+    rsi <= 70 &&
     candleBuy &&
     buyHasRoom &&
     (!higherTrendSell)
   ) {
     signal = "BUY";
-    reason =
-      "EMA ও MACD ঊর্ধ্বমুখী, RSI অনুকূলে এবং ক্যান্ডেল BUY-এর পক্ষে।";
+    reason = "EMA ও MACD ঊর্ধ্বমুখী, RSI অনুকূলে এবং ক্যান্ডেল BUY-এর পক্ষে।";
   } else if (
-    adx >= 14 &&
+    adx >= 12 &&
     sellScore >= 6 &&
-    sellScore - buyScore >= 2 &&
+    sellScore - buyScore >= 1 &&
     emaSell &&
     macdSell &&
-    rsi >= 32 &&
-    rsi <= 50 &&
+    rsi >= 30 &&
+    rsi <= 52 &&
     candleSell &&
     sellHasRoom &&
     (!higherTrendBuy)
   ) {
     signal = "SELL";
-    reason =
-      "EMA ও MACD নিম্নমুখী, RSI অনুকূলে এবং ক্যান্ডেল SELL-এর পক্ষে।";
+    reason = "EMA ও MACD নিম্নমুখী, RSI অনুকূলে এবং ক্যান্ডেল SELL-এর পক্ষে।";
   }
 
   return {
@@ -554,7 +517,6 @@ function analyzeCandles(pair, candles) {
     sellScore,
     dataStatus: "VALID",
     price: last.close,
-
     indicators: {
       rsi: Number(rsi.toFixed(2)),
       ema9: Number(ema9.toFixed(6)),
@@ -566,28 +528,17 @@ function analyzeCandles(pair, candles) {
       atr: Number(atr.toFixed(6)),
       support: Number(support.toFixed(6)),
       resistance: Number(resistance.toFixed(6)),
-      fiveMinuteTrend: higherTrendBuy
-        ? "UP"
-        : higherTrendSell
-          ? "DOWN"
-          : "SIDEWAYS"
+      fiveMinuteTrend: higherTrendBuy ? "UP" : higherTrendSell ? "DOWN" : "SIDEWAYS"
     },
-
     analysisTime: new Date().toISOString(),
     expiry: "1 Minute"
   };
 }
 
-
-// -----------------------------
-// SCAN ONE PAIR
-// -----------------------------
-
 async function scanPair(pair) {
   const candles = await getMarketData(pair);
   return analyzeCandles(pair, candles);
 }
-
 
 // -----------------------------
 // PUBLIC FRONTEND FILES ONLY
@@ -605,7 +556,6 @@ app.get("/script.js", (req, res) => {
   res.sendFile(path.join(__dirname, "script.js"));
 });
 
-
 // -----------------------------
 // DEVICE ACCESS STATUS
 // -----------------------------
@@ -621,7 +571,6 @@ app.get("/api/access/status", async (req, res) => {
     res.status(503).json({ success: false, code: "DATABASE_REQUIRED", message: "অ্যাক্সেস সিস্টেম চালু করতে Render PostgreSQL DATABASE_URL সেট করুন।" });
   }
 });
-
 
 // -----------------------------
 // HEALTH
@@ -640,7 +589,6 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-
 // -----------------------------
 // SCAN ALL MARKETS
 // -----------------------------
@@ -651,6 +599,17 @@ app.get("/api/scan", requireActiveDevice, async (req, res) => {
       success: false,
       message: "Twelve Data API Key সেট করা নেই।"
     });
+  }
+
+  const now = Date.now();
+  if (
+    !activeScanPromise &&
+    lastScan &&
+    !lastScan.rateLimited &&
+    lastScan.validMarkets > 0 &&
+    (now - lastScanAt < SCAN_CACHE_TTL)
+  ) {
+    return res.json(lastScan);
   }
 
   try {
@@ -665,23 +624,18 @@ app.get("/api/scan", requireActiveDevice, async (req, res) => {
             results.push(result);
           } catch (error) {
             if (error.status === 429) rateLimited = true;
-
             results.push({
               pair,
               signal: "WAIT",
               technicalScore: null,
-              dataStatus: error.status === 429
-                ? "RATE_LIMITED"
-                : "ERROR",
+              dataStatus: error.status === 429 ? "RATE_LIMITED" : "ERROR",
               reason: error.message || "মার্কেট বিশ্লেষণ করা যায়নি।"
             });
-
             if (rateLimited) break;
           }
         }
 
         const checked = new Set(results.map(r => r.pair));
-
         for (const pair of PAIRS) {
           if (!checked.has(pair)) {
             results.push({
@@ -694,9 +648,7 @@ app.get("/api/scan", requireActiveDevice, async (req, res) => {
           }
         }
 
-        const validMarkets = results.filter(
-          r => r.dataStatus === "VALID"
-        ).length;
+        const validMarkets = results.filter(r => r.dataStatus === "VALID").length;
 
         const candidates = results
           .filter(r =>
@@ -705,8 +657,7 @@ app.get("/api/scan", requireActiveDevice, async (req, res) => {
           )
           .sort((a, b) =>
             b.technicalScore - a.technicalScore ||
-            Math.abs(b.buyScore - b.sellScore) -
-            Math.abs(a.buyScore - a.sellScore) ||
+            Math.abs(b.buyScore - b.sellScore) - Math.abs(a.buyScore - a.sellScore) ||
             b.indicators.adx - a.indicators.adx
           );
 
@@ -723,6 +674,7 @@ app.get("/api/scan", requireActiveDevice, async (req, res) => {
             ? "সেরা উপযুক্ত সিগন্যাল পাওয়া গেছে।"
             : "এখন উপযুক্ত সেটআপ নেই। WAIT করুন।"
         };
+        lastScanAt = Date.now();
 
         return lastScan;
       })().finally(() => {
@@ -739,7 +691,6 @@ app.get("/api/scan", requireActiveDevice, async (req, res) => {
     });
   }
 });
-
 
 // -----------------------------
 // ANALYZE SELECTED MARKET
@@ -758,11 +709,7 @@ app.get("/api/analyze", requireActiveDevice, async (req, res) => {
   try {
     const candles = await getMarketData(pair);
     const result = analyzeCandles(pair, candles);
-
-    res.json({
-      success: true,
-      result
-    });
+    res.json({ success: true, result });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -770,7 +717,6 @@ app.get("/api/analyze", requireActiveDevice, async (req, res) => {
     });
   }
 });
-
 
 // -----------------------------
 // LAST SCAN
@@ -784,7 +730,6 @@ app.get("/api/last-scan", requireActiveDevice, (req, res) => {
     message: "এখনো কোনো স্ক্যান করা হয়নি।"
   });
 });
-
 
 // -----------------------------
 // START SERVER
