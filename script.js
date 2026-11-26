@@ -144,7 +144,7 @@ function showAnalysis(result) {
 
   $("selectedMarket").textContent = result.pair;
   $("marketPrice").textContent = formatPrice(result.price, result.pair);
-  $("priceStatus").textContent = "শেষ সম্পন্ন ক্যান্ডেলের দাম";
+  $("priceStatus").textContent = result.isPartialCandle ? "চলমান ক্যান্ডেলের লাইভ দাম (শেষের ১০ সেকেন্ড)" : "শেষ সম্পন্ন ক্যান্ডেলের দাম";
 
   let subtitle = "বাজার বিশ্লেষণ সম্পন্ন";
   if (result.signal === "BUY") {
@@ -242,9 +242,15 @@ async function scanAllMarkets() {
       return;
     }
 
-    showAnalysis(best);
+    // The closed-candle scan only selects a market. Never publish its BUY/SELL
+    // result; the visible decision must come from the verified pre-close quote.
+    showAnalysis({
+      ...best,
+      signal: "WAIT",
+      reason: "ক্যান্ডেল শেষ হওয়ার ১০ সেকেন্ড আগের লাইভ যাচাইয়ের অপেক্ষা চলছে।"
+    });
     setStatus("Best market selected", "green");
-    $("analysisStatus").textContent = "সেরা উপযুক্ত মার্কেট নির্বাচন করা হয়েছে।";
+    $("analysisStatus").textContent = "মার্কেট নির্বাচিত; প্রি-ক্লোজ লাইভ যাচাইয়ের অপেক্ষা চলছে।";
     scheduleNextCheck();
   } catch (error) {
     if (!running) return;
@@ -280,7 +286,7 @@ async function recheckSelectedMarket() {
 
   try {
     const data = await apiRequest(
-      "/api/analyze?pair=" + encodeURIComponent(pairToCheck)
+      "/api/analyze?pair=" + encodeURIComponent(pairToCheck) + "&mode=preclose"
     );
 
     if (!running || selectedPair !== pairToCheck) return;
@@ -346,8 +352,8 @@ function getSecondsUntilCheck() {
   const now = new Date();
   const target = new Date(now);
 
-  target.setSeconds(3, 0);
-  if (target.getTime() - now.getTime() < 5000) {
+  target.setSeconds(50, 0);
+  if (target.getTime() - now.getTime() < 2000) {
     target.setMinutes(target.getMinutes() + 1);
   }
 
