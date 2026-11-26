@@ -540,6 +540,105 @@ async function scanPair(pair) {
   return analyzeCandles(pair, candles);
 }
 
+// Build a pre-close analysis from the current, still-forming 1-minute quote.
+// Historical candles remain the completed candles already obtained by /time_series.
+function parseProviderTimestamp(value) {
+  if (value == null) return NaN;
+  if (typeof value === "number" || /^\\d+(\\.\\d+)?$/.test(String(value))) {
+    const numeric = Number(value);
+    return numeric < 1e12 ? numeric * 1000 : numeric;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+async function getPreCloseMarketData(pair) {
+  const now = Date.now();
+  const currentMinuteStart = Math.floor(now / 60000) * 60000;
+  const secondsRemaining = (currentMinuteStart + 60000 - now) / 1000;
+
+  if (secondsRemaining > 15 || secondsRemaining <= 0) {
+    throw new Error("ক্যান্ডেল শেষ হওয়ার আগের নির্ধারিত সময়সীমা নেই। WAIT করুন।");
+  }
+
+  const cached = cache.get(pair);
+  if (!cached || !Array.isArray(cached.candles) || cached.candles.length < 60) {
+    throw new Error("প্রয়োজনীয় পূর্ববর্তী ক্যান্ডেল ক্যাশে নেই। নতুন তথ্যের অপেক্ষায় WAIT।");
+  }
+
+  const history = cached.candles;
+  const lastCompleted = history[history.length - 1];
+  const historyAge = currentMinuteStart - lastCompleted.time;
+
+  // REST time_series candles can be delayed. Do not bridge a large data gap.
+  if (
+    !Number.isFinite(lastCompleted.time) ||
+    lastCompleted.time >= currentMinuteStart ||
+    historyAge > 180000 ||
+    historyAge < 60000
+  ) {
+    throw new Error("Twelve Data-এর পূর্ববর্তী ক্যান্ডেল পুরোনো বা অসম্পূর্ণ। WAIT করুন।");
+  }
+
+  const url =
+    "https://api.twelvedata.com/quote" +
+    `?symbol=${encodeURIComponent(pair)}` +
+    `&interval=1min` +
+    `&include_ohlc=true` +
+    `&timezone=UTC` +
+    `&apikey=${encodeURIComponent(API_KEY)}`;
+
+  const quote = await queuedFetch(url);
+  const receivedAt = Date.now();
+  const liveCandleTime = parseProviderTimestamp(quote.timestamp);
+  const lastUpdateAt = parseProviderTimestamp(quote.last_update_at);
+
+  if (!Number.isFinite(liveCandleTime) || liveCandleTime !== currentMinuteStart) {
+    throw new Error("Twelve Data-এর লাইভ ক্যান্ডেল বর্তমান মিনিটের নয়। WAIT করুন।");
+  }
+
+  // A candle timestamp identifies its opening time, not the freshness of its price.
+  if (
+    !Number.isFinite(lastUpdateAt) ||
+    receivedAt - lastUpdateAt < -5000 ||
+    receivedAt - lastUpdateAt > 15000
+  ) {
+    throw new Error("লাইভ মার্কেট ডেটা আপডেট নেই বা পুরোনো। WAIT করুন।");
+  }
+
+  const live = {
+    time: liveCandleTime,
+    open: Number(quote.open),
+    high: Number(quote.high),
+    low: Number(quote.low),
+    close: Number(quote.close)
+  };
+
+  if (
+    !Number.isFinite(live.open) ||
+    !Number.isFinite(live.high) ||
+    !Number.isFinite(live.low) ||
+    !Number.isFinite(live.close) ||
+    live.high < Math.max(live.open, live.close) ||
+    live.low > Math.min(live.open, live.close) ||
+    live.high < live.low
+  ) {
+    throw new Error("লাইভ অসম্পূর্ণ ক্যান্ডেলের OHLC তথ্য সঠিক নয়। WAIT করুন।");
+  }
+
+  const finalRemaining = (currentMinuteStart + 60000 - receivedAt) / 1000;
+  if (finalRemaining <= 0 || finalRemaining > 15) {
+    throw new Error("লাইভ ডেটা নির্ধারিত প্রি-ক্লোজ সময়ের বাইরে এসেছে। WAIT করুন।");
+  }
+
+  return {
+    candles: [...history.filter(c => c.time < currentMinuteStart), live],
+    liveCandleTime,
+    lastUpdateAt,
+    secondsRemaining: finalRemaining
+  };
+}
+
 // -----------------------------
 // PUBLIC FRONTEND FILES ONLY
 // -----------------------------
@@ -707,6 +806,18 @@ app.get("/api/analyze", requireActiveDevice, async (req, res) => {
   }
 
   try {
+    if (req.query.mode === "preclose") {
+      const liveData = await getPreCloseMarketData(pair);
+      const result = analyzeCandles(pair, liveData.candles);
+      result.isPartialCandle = true;
+      result.candleTime = new Date(liveData.liveCandleTime).toISOString();
+      result.dataUpdatedAt = new Date(liveData.lastUpdateAt).toISOString();
+      result.secondsUntilCandleClose = Number(liveData.secondsRemaining.toFixed(1));
+      result.analysisMode = "PRE_CLOSE_10_SECONDS";
+      res.json({ success: true, result });
+      return;
+    }
+
     const candles = await getMarketData(pair);
     const result = analyzeCandles(pair, candles);
     res.json({ success: true, result });
