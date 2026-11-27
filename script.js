@@ -1,7 +1,6 @@
 const $ = id => document.getElementById(id);
 
 let running = false;
-let accessActive = false;
 let selectedPair = null;
 let countdownTimer = null;
 let nextCheckTimer = null;
@@ -44,34 +43,6 @@ function formatPrice(value, pair) {
 
 function formatTime(date) {
   return new Date(date).toLocaleTimeString();
-}
-
-function showAccessExpiredModal(noteText = "এই ডিভাইসের ৪৮ ঘণ্টার ফ্রি ব্যবহারের সময় শেষ হয়েছে।") {
-  accessActive = false;
-  stopAnalysis();
-  $("startAnalysis").disabled = true;
-  $("stopAnalysis").disabled = true;
-
-  const modal = $("accessExpiredModal");
-  if (modal) {
-    modal.hidden = false;
-  }
-  document.body.classList.add("access-expired");
-
-  const note = $("accessCheckNote");
-  if (note) {
-    note.textContent = noteText;
-  }
-
-  setStatus("Access expired", "red");
-}
-
-function hideAccessExpiredModal() {
-  const modal = $("accessExpiredModal");
-  if (modal) {
-    modal.hidden = true;
-  }
-  document.body.classList.remove("access-expired");
 }
 
 // -----------------------------
@@ -255,11 +226,6 @@ async function scanAllMarkets() {
   } catch (error) {
     if (!running) return;
 
-    if (error.status === 403 || error.code === "ACCESS_EXPIRED") {
-      showError(error.message);
-      showAccessExpiredModal(error.message);
-      return;
-    }
 
     showError(error.message);
     setStatus("Connection error", "red");
@@ -318,11 +284,6 @@ async function recheckSelectedMarket() {
   } catch (error) {
     if (!running) return;
 
-    if (error.status === 403 || error.code === "ACCESS_EXPIRED") {
-      showError(error.message);
-      showAccessExpiredModal(error.message);
-      return;
-    }
 
     errorCount++;
     weakCount++;
@@ -396,7 +357,7 @@ function scheduleNextCheck() {
 // -----------------------------
 
 async function startAnalysis() {
-  if (running || !accessActive) return;
+  if (running) return;
 
   running = true;
   weakCount = 0;
@@ -429,15 +390,13 @@ function stopAnalysis() {
     requestController.abort();
   }
 
-  $("startAnalysis").disabled = !accessActive;
+  $("startAnalysis").disabled = false;
   $("stopAnalysis").disabled = true;
 
   $("analysisStatus").textContent = "বিশ্লেষণ বন্ধ করা হয়েছে";
   $("nextSignalCheck").textContent = "--";
 
-  if (accessActive) {
-    setStatus("Stopped", "yellow");
-  }
+  setStatus("Stopped", "yellow");
 }
 
 // -----------------------------
@@ -446,21 +405,6 @@ function stopAnalysis() {
 
 async function initializeApp() {
   try {
-    const access = await apiRequest("/api/access/status");
-
-    if (!access.active) {
-      showAccessExpiredModal("আপনার ৪৮ ঘণ্টার ফ্রি ব্যবহারের সময় শেষ হয়েছে।");
-      return;
-    }
-
-    accessActive = true;
-
-    // ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
-    document.body.classList.remove("developer-global-locked");
-    // ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
-
-    hideAccessExpiredModal();
-
     const health = await apiRequest("/api/health");
     if (health.twelveDataConfigured) {
       setStatus("Backend connected", "green");
@@ -473,17 +417,9 @@ async function initializeApp() {
       $("analysisStatus").textContent = "API key অনুপস্থিত";
     }
   } catch (error) {
-    accessActive = false;
-
-    // ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
-    document.body.classList.remove("developer-global-locked");
-    // ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
-
-    hideAccessExpiredModal();
     $("startAnalysis").disabled = true;
     setStatus("Backend disconnected", "red");
-    $("analysisReason").textContent =
-      error.message || "সার্ভারের সঙ্গে সংযোগ করা যাচ্ছে না।";
+    $("analysisReason").textContent = error.message || "সার্ভারের সঙ্গে সংযোগ করা যাচ্ছে না।";
     $("analysisStatus").textContent = "সংযোগ ব্যর্থ";
   }
 }
