@@ -454,6 +454,11 @@ async function initializeApp() {
     }
 
     accessActive = true;
+
+    // ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
+    document.body.classList.remove("developer-global-locked");
+    // ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
+
     hideAccessExpiredModal();
 
     const health = await apiRequest("/api/health");
@@ -469,6 +474,11 @@ async function initializeApp() {
     }
   } catch (error) {
     accessActive = false;
+
+    // ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
+    document.body.classList.remove("developer-global-locked");
+    // ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
+
     hideAccessExpiredModal();
     $("startAnalysis").disabled = true;
     setStatus("Backend disconnected", "red");
