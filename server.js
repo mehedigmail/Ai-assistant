@@ -2,8 +2,6 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const { Pool } = require("pg");
-const crypto = require("crypto");
 const path = require("path");
 
 const app = express();
@@ -14,12 +12,6 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.TWELVE_DATA_API_KEY;
-
-// ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
-// true  = show the existing 48-hour expired popup to every visitor.
-// false = remove this global lock and return to the normal 48-hour access system.
-const GLOBAL_LOCK = true;
-// ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
 
 const PAIRS = [
   "EUR/USD",
@@ -35,103 +27,6 @@ const OUTPUT_SIZE = 250;
 const CACHE_TTL = 45000;
 const SCAN_CACHE_TTL = 20000;
 const REQUEST_GAP = Number(process.env.REQUEST_GAP_MS || 8000);
-
-// Persistent, password-free device access. Render PostgreSQL is required.
-const DATABASE_URL = process.env.DATABASE_URL;
-const pool = DATABASE_URL ? new Pool({
-  connectionString: DATABASE_URL,
-  ssl: process.env.DATABASE_SSL === "false" ? false : { rejectUnauthorized: false },
-  max: Number(process.env.DB_POOL_MAX || 10),
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000
-}) : null;
-
-const DEVICE_COOKIE = "rm_device";
-const ACCESS_HOURS = 48;
-const ACCESS_MS = ACCESS_HOURS * 60 * 60 * 1000;
-const COOKIE_MS = 400 * 24 * 60 * 60 * 1000;
-
-function readCookie(req, name) {
-  const raw = req.headers.cookie || "";
-  for (const part of raw.split(";")) {
-    const index = part.indexOf("=");
-    if (index < 0) continue;
-    if (part.slice(0, index).trim() === name) {
-      try { return decodeURIComponent(part.slice(index + 1).trim()); }
-      catch { return null; }
-    }
-  }
-  return null;
-}
-
-function tokenHash(token) {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
-
-function setDeviceCookie(res, token) {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  res.setHeader("Set-Cookie",
-    `${DEVICE_COOKIE}=${encodeURIComponent(token)}; Max-Age=${Math.floor(COOKIE_MS / 1000)}; Path=/; HttpOnly; SameSite=Lax${secure}`
-  );
-}
-
-async function initDatabase() {
-  if (!pool) throw new Error("Render PostgreSQL DATABASE_URL সেট করা নেই।");
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS device_access (
-      id BIGSERIAL PRIMARY KEY,
-      token_hash CHAR(64) UNIQUE NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      expires_at TIMESTAMPTZ NOT NULL,
-      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS device_access_expires_idx ON device_access (expires_at)`);
-}
-
-async function registerOrReadDevice(req, res) {
-  if (!pool) throw new Error("DATABASE_URL_MISSING");
-  let token = readCookie(req, DEVICE_COOKIE);
-  if (token && token.length >= 40 && token.length <= 200) {
-    const found = await pool.query(
-      `SELECT id, created_at, expires_at, (expires_at > NOW()) AS active FROM device_access WHERE token_hash=$1`,
-      [tokenHash(token)]
-    );
-    if (found.rows.length) {
-      await pool.query(`UPDATE device_access SET last_seen_at=NOW() WHERE id=$1`, [found.rows[0].id]);
-      return found.rows[0];
-    }
-  }
-
-  token = crypto.randomBytes(32).toString("base64url");
-  const created = await pool.query(
-    `INSERT INTO device_access (token_hash, expires_at) VALUES ($1, NOW() + INTERVAL '48 hours') RETURNING id, created_at, expires_at, TRUE AS active`,
-    [tokenHash(token)]
-  );
-  setDeviceCookie(res, token);
-  return created.rows[0];
-}
-
-async function requireActiveDevice(req, res, next) {
-  try {
-    if (!pool) return res.status(503).json({ success: false, code: "DATABASE_REQUIRED", message: "Access database সেটআপ করা হয়নি।" });
-    const token = readCookie(req, DEVICE_COOKIE);
-    if (!token) return res.status(403).json({ success: false, code: "ACCESS_EXPIRED", message: "এই ডিভাইসের অ্যাক্সেস নেই।" });
-    const result = await pool.query(
-      `SELECT id, expires_at, (expires_at > NOW()) AS active FROM device_access WHERE token_hash=$1`,
-      [tokenHash(token)]
-    );
-    if (!result.rows.length || !result.rows[0].active) {
-      return res.status(403).json({ success: false, code: "ACCESS_EXPIRED", message: "এই ডিভাইসের ৪৮ ঘণ্টার অ্যাক্সেস শেষ হয়েছে।" });
-    }
-    req.deviceAccess = result.rows[0];
-    await pool.query(`UPDATE device_access SET last_seen_at=NOW() WHERE id=$1`, [req.deviceAccess.id]);
-    next();
-  } catch (error) {
-    console.error("Device access check failed:", error.message);
-    res.status(503).json({ success: false, code: "ACCESS_CHECK_FAILED", message: "অ্যাক্সেস যাচাই করা যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।" });
-  }
-}
 
 let lastScan = null;
 let lastScanAt = 0;
@@ -665,43 +560,9 @@ app.get("/script.js", (req, res) => {
 // DEVICE ACCESS STATUS
 // -----------------------------
 
-app.get("/api/access/status", async (req, res) => {
-  // ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
-  if (GLOBAL_LOCK) {
-    return res.json({
-      success: true,
-      active: false,
-      globalLocked: true,
-      expiresAt: null,
-      remainingMs: 0
-    });
-  }
-  // ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
-
-  try {
-    const device = await registerOrReadDevice(req, res);
-    const expiresAt = new Date(device.expires_at);
-    const remainingMs = Math.max(0, expiresAt.getTime() - Date.now());
-    res.json({ success: true, active: Boolean(device.active), expiresAt: expiresAt.toISOString(), remainingMs });
-  } catch (error) {
-    console.error("Access status error:", error.message);
-    res.status(503).json({ success: false, code: "DATABASE_REQUIRED", message: "অ্যাক্সেস সিস্টেম চালু করতে Render PostgreSQL DATABASE_URL সেট করুন।" });
-  }
+app.get("/api/access/status", (req, res) => {
+  res.json({ success: true, active: true, unlimited: true });
 });
-
-// ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
-// This middleware blocks direct API access as well as normal frontend requests.
-app.use("/api", (req, res, next) => {
-  if (GLOBAL_LOCK) {
-    return res.status(403).json({
-      success: false,
-      code: "ACCESS_EXPIRED",
-      message: "আপনার ৪৮ ঘণ্টার ফ্রি ব্যবহারের সময় শেষ হয়েছে।"
-    });
-  }
-  next();
-});
-// ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
 
 // -----------------------------
 // HEALTH
@@ -724,7 +585,7 @@ app.get("/api/health", (req, res) => {
 // SCAN ALL MARKETS
 // -----------------------------
 
-app.get("/api/scan", requireActiveDevice, async (req, res) => {
+app.get("/api/scan", async (req, res) => {
   if (!API_KEY) {
     return res.status(500).json({
       success: false,
@@ -827,7 +688,7 @@ app.get("/api/scan", requireActiveDevice, async (req, res) => {
 // ANALYZE SELECTED MARKET
 // -----------------------------
 
-app.get("/api/analyze", requireActiveDevice, async (req, res) => {
+app.get("/api/analyze", async (req, res) => {
   const pair = req.query.pair;
 
   if (!PAIRS.includes(pair)) {
@@ -865,7 +726,7 @@ app.get("/api/analyze", requireActiveDevice, async (req, res) => {
 // LAST SCAN
 // -----------------------------
 
-app.get("/api/last-scan", requireActiveDevice, (req, res) => {
+app.get("/api/last-scan", (req, res) => {
   res.json(lastScan || {
     success: true,
     selected: null,
@@ -880,10 +741,9 @@ app.get("/api/last-scan", requireActiveDevice, (req, res) => {
 
 async function startServer() {
   try {
-    await initDatabase();
     app.listen(PORT, () => {
       console.log(`Auto Best Market Signal running on port ${PORT}`);
-      console.log("Device access database connected; 48-hour access enabled.");
+      console.log("Unlimited public access enabled; no 48-hour access restriction.");
     });
   } catch (error) {
     console.error("Startup blocked:", error.message);
