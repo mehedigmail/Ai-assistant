@@ -60,12 +60,16 @@
     .access-modal-note { margin-top: 18px !important; font-size: 12px !important; color: #71819a !important; }
     .access-check-note { margin-top: 10px; color: #71819a; font-size: 10px; }
     body.access-expired { overflow: hidden; }
+
+    /* ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM ===== */
+    body.developer-global-locked .cockpit { display: none !important; }
+    /* ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM ===== */
     @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
     @media (max-width: 900px) { .radar-arena { grid-template-columns: 1fr 1fr; grid-template-areas: "center center" "tl tr" "bl br"; } .w-tr, .w-br { text-align: left; } .dock { grid-template-columns: 1fr; } }
     @media (max-width: 560px) { .radar-arena { grid-template-columns: 1fr; grid-template-areas: "center" "tl" "tr" "bl" "br"; } .dock-btns { flex-direction: column; } }
   </style>
 </head>
-<body>
+<body class="developer-global-locked">
   <main class="cockpit">
     <header class="hud-top">
       <div class="brand"><div class="brand-icon">AS</div><div><h1>Auto Signal Radar</h1><p>Orbital Market Core</p></div></div>
