@@ -15,6 +15,12 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.TWELVE_DATA_API_KEY;
 
+// ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
+// true  = show the existing 48-hour expired popup to every visitor.
+// false = remove this global lock and return to the normal 48-hour access system.
+const GLOBAL_LOCK = true;
+// ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
+
 const PAIRS = [
   "EUR/USD",
   "GBP/USD",
@@ -660,6 +666,18 @@ app.get("/script.js", (req, res) => {
 // -----------------------------
 
 app.get("/api/access/status", async (req, res) => {
+  // ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
+  if (GLOBAL_LOCK) {
+    return res.json({
+      success: true,
+      active: false,
+      globalLocked: true,
+      expiresAt: null,
+      remainingMs: 0
+    });
+  }
+  // ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
+
   try {
     const device = await registerOrReadDevice(req, res);
     const expiresAt = new Date(device.expires_at);
@@ -670,6 +688,20 @@ app.get("/api/access/status", async (req, res) => {
     res.status(503).json({ success: false, code: "DATABASE_REQUIRED", message: "অ্যাক্সেস সিস্টেম চালু করতে Render PostgreSQL DATABASE_URL সেট করুন।" });
   }
 });
+
+// ===== START: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
+// This middleware blocks direct API access as well as normal frontend requests.
+app.use("/api", (req, res, next) => {
+  if (GLOBAL_LOCK) {
+    return res.status(403).json({
+      success: false,
+      code: "ACCESS_EXPIRED",
+      message: "আপনার ৪৮ ঘণ্টার ফ্রি ব্যবহারের সময় শেষ হয়েছে।"
+    });
+  }
+  next();
+});
+// ===== END: DEVELOPER EXTRA GLOBAL LOCK SYSTEM =====
 
 // -----------------------------
 // HEALTH
