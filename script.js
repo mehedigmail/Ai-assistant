@@ -11,6 +11,41 @@ let weakCount = 0;
 let errorCount = 0;
 let scanBusy = false;
 
+// ===== START: ANONYMOUS USER STATISTICS =====
+function getStatsClientId() {
+  const storageKey = "rm_stats_client_id_v1";
+  let id = "";
+  try { id = localStorage.getItem(storageKey) || ""; } catch (_) {}
+  if (!/^[a-zA-Z0-9_-]{12,80}$/.test(id)) {
+    id = "u_" + Array.from(crypto.getRandomValues(new Uint8Array(18)))
+      .map(n => n.toString(16).padStart(2, "0")).join("");
+    try { localStorage.setItem(storageKey, id); } catch (_) {}
+  }
+  return id;
+}
+const statsClientId = getStatsClientId();
+let lastTrackedSignalKey = "";
+async function sendStatsEvent(endpoint, payload = {}) {
+  try {
+    await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Client-ID": statsClientId },
+      body: JSON.stringify(payload),
+      keepalive: true
+    });
+  } catch (_) {}
+}
+function sendStatsHeartbeat() {
+  if (document.visibilityState === "visible") {
+    sendStatsEvent("/api/stats/heartbeat");
+  }
+}
+sendStatsHeartbeat();
+setInterval(sendStatsHeartbeat, 30000);
+document.addEventListener("visibilitychange", sendStatsHeartbeat);
+// ===== END: ANONYMOUS USER STATISTICS =====
+
+
 function setStatus(text, color = "yellow") {
   $("statusText").textContent = text;
 
@@ -127,6 +162,20 @@ function showAnalysis(result) {
   }
 
   setSignal(result.signal, subtitle);
+
+  // Count only BUY/SELL signals actually displayed to the user.
+  if (result.signal === "BUY" || result.signal === "SELL") {
+    const candleKey = result.candleTime || Math.floor(Date.now() / 60000);
+    const eventKey = `${result.pair}|${result.signal}|${candleKey}`;
+    if (eventKey !== lastTrackedSignalKey) {
+      lastTrackedSignalKey = eventKey;
+      sendStatsEvent("/api/stats/signal", {
+        pair: result.pair,
+        signal: result.signal,
+        candleTime: String(candleKey)
+      });
+    }
+  }
 
   $("confidence").textContent =
     result.technicalScore != null ? result.technicalScore + "%" : "--%";
