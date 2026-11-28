@@ -3,6 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 
 const app = express();
 
@@ -27,6 +28,136 @@ const OUTPUT_SIZE = 250;
 const CACHE_TTL = 45000;
 const SCAN_CACHE_TTL = 20000;
 const REQUEST_GAP = Number(process.env.REQUEST_GAP_MS || 8000);
+
+// ===== START: PRIVATE USER STATISTICS (ADDITIVE ONLY) =====
+// Uses a local JSON file. For persistence across Render restarts/redeploys,
+// configure a Render Persistent Disk and set STATS_FILE to its mount path.
+const ADMIN_STATS_KEY = process.env.ADMIN_STATS_KEY || "";
+const STATS_FILE = process.env.STATS_FILE || path.join(__dirname, "user-stats.json");
+const ACTIVE_WINDOW_MS = 2 * 60 * 1000;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function readStats() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(STATS_FILE, "utf8"));
+    if (parsed && parsed.users && parsed.days) return parsed;
+  } catch (_) {}
+  return { users: {}, days: {} };
+}
+let userStats = readStats();
+let statsWriteTimer = null;
+function saveStats() {
+  try {
+    const dir = path.dirname(STATS_FILE);
+    fs.mkdirSync(dir, { recursive: true });
+    const tempFile = STATS_FILE + ".tmp";
+    fs.writeFileSync(tempFile, JSON.stringify(userStats));
+    fs.renameSync(tempFile, STATS_FILE);
+  } catch (error) {
+    console.error("User statistics save failed:", error.message);
+  }
+}
+function todayKey() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Dhaka", year: "numeric", month: "2-digit", day: "2-digit"
+  }).format(new Date());
+}
+function getDay(key) {
+  if (!userStats.days[key]) {
+    userStats.days[key] = { visitors: {}, signalUsers: {}, signals: 0, signalEvents: {} };
+  }
+  return userStats.days[key];
+}
+function validClientId(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9_-]{12,80}$/.test(value);
+}
+function recordVisit(clientId) {
+  const now = Date.now();
+  const dayKey = todayKey();
+  if (!userStats.users[clientId]) {
+    userStats.users[clientId] = { firstSeen: now, lastSeen: now, signalDays: {} };
+  }
+  userStats.users[clientId].lastSeen = now;
+  getDay(dayKey).visitors[clientId] = 1;
+  saveStats();
+}
+function recordSignal(clientId, pair, signal, candleTime) {
+  const now = Date.now();
+  const dayKey = todayKey();
+  if (!userStats.users[clientId]) {
+    userStats.users[clientId] = { firstSeen: now, lastSeen: now, signalDays: {} };
+  }
+  const user = userStats.users[clientId];
+  user.lastSeen = now;
+  const day = getDay(dayKey);
+  day.visitors[clientId] = 1;
+  day.signalUsers[clientId] = 1;
+  const signalDay = user.signalDays[dayKey] || { count: 0 };
+  const eventKey = `${clientId}|${String(pair).slice(0, 20)}|${signal}|${String(candleTime || Math.floor(now / 60000)).slice(0, 40)}`;
+  if (!day.signalEvents[eventKey]) {
+    day.signalEvents[eventKey] = 1;
+    day.signals += 1;
+    signalDay.count += 1;
+  }
+  user.signalDays[dayKey] = signalDay;
+  saveStats();
+}
+function adminAuthorized(req) {
+  const supplied = String(req.query.key || req.get("x-admin-key") || "");
+  return Boolean(ADMIN_STATS_KEY && supplied && supplied === ADMIN_STATS_KEY);
+}
+
+app.post("/api/stats/heartbeat", (req, res) => {
+  const clientId = req.get("x-client-id");
+  if (!validClientId(clientId)) return res.status(400).json({ success: false });
+  recordVisit(clientId);
+  res.json({ success: true });
+});
+
+app.post("/api/stats/signal", (req, res) => {
+  const clientId = req.get("x-client-id");
+  const { pair, signal, candleTime } = req.body || {};
+  if (!validClientId(clientId) || !PAIRS.includes(pair) || !["BUY", "SELL"].includes(signal)) {
+    return res.status(400).json({ success: false });
+  }
+  recordSignal(clientId, pair, signal, candleTime);
+  res.json({ success: true });
+});
+
+app.get("/api/admin/stats", (req, res) => {
+  if (!adminAuthorized(req)) return res.status(404).json({ success: false });
+  res.set("Cache-Control", "no-store");
+  const now = Date.now();
+  const today = todayKey();
+  const users = Object.values(userStats.users);
+  const activeUsers = users.filter(u => now - u.lastSeen <= ACTIVE_WINDOW_MS).length;
+  const weeklyUsers = users.filter(u => now - u.lastSeen <= WEEK_MS).length;
+  const inactiveUsers = users.length - weeklyUsers;
+  const daily = Object.entries(userStats.days)
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .slice(0, 30)
+    .map(([date, d]) => ({
+      date,
+      visitors: Object.keys(d.visitors || {}).length,
+      signalUsers: Object.keys(d.signalUsers || {}).length,
+      signals: Number(d.signals || 0)
+    }));
+  res.json({ success: true, today, totalUsers: users.length, activeUsers, weeklyUsers, inactiveUsers, todayData: daily.find(d => d.date === today) || { visitors: 0, signalUsers: 0, signals: 0 }, daily });
+});
+
+app.get("/developer-stats", (req, res) => {
+  if (!adminAuthorized(req)) return res.status(404).send("Not Found");
+  res.set("Cache-Control", "no-store");
+  res.type("html").send(`<!doctype html><html lang="bn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ব্যবহারকারী পরিসংখ্যান</title><style>
+  *{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:#172033;font-family:Arial,'Noto Sans Bengali',sans-serif;padding:22px}.wrap{max-width:900px;margin:auto}h1{font-size:24px;margin:0 0 6px}.muted{color:#667085;font-size:13px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:22px 0}.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:18px;box-shadow:0 2px 8px #1018280a}.num{font-size:30px;font-weight:700;margin:9px 0 3px}.label{font-size:13px;color:#667085}.section{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px;overflow:auto}table{border-collapse:collapse;width:100%;min-width:520px;margin-top:10px}th,td{text-align:left;padding:11px 9px;border-bottom:1px solid #edf0f4;font-size:13px}th{color:#667085;background:#f8fafc}.top{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}button{border:0;background:#172033;color:white;border-radius:9px;padding:10px 14px;font-weight:600}@media(min-width:650px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  </style></head><body><main class="wrap"><div class="top"><div><h1>ব্যবহারকারী পরিসংখ্যান</h1><div class="muted">শুধু আপনার জন্য · সময়: বাংলাদেশ</div></div><button onclick="loadStats()">রিফ্রেশ</button></div><section class="grid"><div class="card"><div class="label">এখন সক্রিয়</div><div class="num" id="active">—</div><div class="muted">শেষ ২ মিনিটে ব্যবহার করেছে</div></div><div class="card"><div class="label">আজ সিগন্যাল নেওয়া ইউজার</div><div class="num" id="todayUsers">—</div><div class="muted">আজ অন্তত একটি BUY/SELL পেয়েছে</div></div><div class="card"><div class="label">আজ মোট সিগন্যাল</div><div class="num" id="todaySignals">—</div><div class="muted">একই ক্যান্ডেলের পুনরাবৃত্তি বাদ</div></div><div class="card"><div class="label">গত ৭ দিনে ব্যবহারকারী</div><div class="num" id="weekly">—</div></div><div class="card"><div class="label">নিষ্ক্রিয় পরিচিত ইউজার</div><div class="num" id="inactive">—</div><div class="muted">গত ৭ দিনে আসেনি</div></div><div class="card"><div class="label">মোট আলাদা ব্রাউজার</div><div class="num" id="total">—</div></div></section><section class="section"><div class="top"><strong>দৈনিক ব্যবহার ও সিগন্যাল</strong><span class="muted" id="updated">লোড হচ্ছে…</span></div><table><thead><tr><th>তারিখ</th><th>ভিজিটর</th><th>সিগন্যাল নেওয়া ইউজার</th><th>সিগন্যাল</th></tr></thead><tbody id="rows"><tr><td colspan="4">তথ্য লোড হচ্ছে…</td></tr></tbody></table></section></main><script>
+  const key=new URLSearchParams(location.search).get('key')||'';
+  async function loadStats(){const r=await fetch('/api/admin/stats?key='+encodeURIComponent(key),{cache:'no-store'});if(!r.ok){document.getElementById('rows').innerHTML='<tr><td colspan="4">অনুমতি পাওয়া যায়নি</td></tr>';return}const d=await r.json();document.getElementById('active').textContent=d.activeUsers;document.getElementById('todayUsers').textContent=d.todayData.signalUsers;document.getElementById('todaySignals').textContent=d.todayData.signals;document.getElementById('weekly').textContent=d.weeklyUsers;document.getElementById('inactive').textContent=d.inactiveUsers;document.getElementById('total').textContent=d.totalUsers;document.getElementById('rows').innerHTML=d.daily.map(x=>'<tr><td>'+x.date+'</td><td>'+x.visitors+'</td><td>'+x.signalUsers+'</td><td>'+x.signals+'</td></tr>').join('')||'<tr><td colspan="4">এখনো কোনো তথ্য নেই</td></tr>';document.getElementById('updated').textContent='আপডেট: '+new Date().toLocaleTimeString('bn-BD');}
+  loadStats();setInterval(loadStats,30000);
+  </script></body></html>`);
+});
+// ===== END: PRIVATE USER STATISTICS =====
+
 
 let lastScan = null;
 let lastScanAt = 0;
